@@ -25,7 +25,7 @@
                     "*.cu": "cuda-cpp",
                     "*.cuh": "cuda-cpp"
                 },
-                "github.copilot.enable": true
+                "github.copilot": { "enable": true }
             }
         }
     },

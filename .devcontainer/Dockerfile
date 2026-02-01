@@ -9,7 +9,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bear \
     build-essential \
     git \
+    python3 \
+    python3-pip \
+    expect \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install uv: the package manager
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 ENV CUDA_HOME=/usr/local/cuda
 ENV PATH=${CUDA_HOME}/bin:${PATH}

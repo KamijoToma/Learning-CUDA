@@ -28,30 +28,31 @@ __global__ void traceKernel(const T* d_input, T* d_output, size_t diag_len, size
  */
 template <typename T>
 __global__ void traceKernelWithReduction(const T* d_input, T* d_output, size_t diag_len, size_t cols) {
-  // Shared memory for partial sums
-  extern __shared__ T shared_data[];
+  // Shared memory for partial sums - use char array to avoid template redeclaration issues
+  extern __shared__ char shared_mem[];
+  T* sdata = (T*)shared_mem;
   size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
 
   // Load diagonal elements into shared memory
   if (idx < diag_len) {
-    shared_data[threadIdx.x] = d_input[idx * cols + idx];
+    sdata[threadIdx.x] = d_input[idx * cols + idx];
   } else {
     // Initialize out-of-bounds threads to zero
-    shared_data[threadIdx.x] = T(0);
+    sdata[threadIdx.x] = T(0);
   }
   __syncthreads();
 
   // Parallel reduction within the block
   for (size_t stride = blockDim.x / 2; stride > 0; stride /= 2) {
     if (threadIdx.x < stride) {
-      shared_data[threadIdx.x] += shared_data[threadIdx.x + stride];
+      sdata[threadIdx.x] += sdata[threadIdx.x + stride];
     }
     __syncthreads();
   }
 
   // Write the block's partial sum to global memory
   if (threadIdx.x == 0) {
-    d_output[blockIdx.x] = shared_data[0];
+    d_output[blockIdx.x] = sdata[0];
   }
 }
 
@@ -62,6 +63,12 @@ __global__ void traceKernelWithReduction(const T* d_input, T* d_output, size_t d
  * This function expects a flattened row-major matrix stored in a
  * std::vector. If the matrix is not square, the trace will sum up
  * elements along the main diagonal up to the smaller of rows or cols.
+ * 
+ * The input can not be modified so pinning memory is not applicable here.
+ * Sothat CUDA Streams cannot be used in this implementation.
+ *
+ * According to the performance report, sometimes the native kernel
+ * performs better than the reduction kernel.
  *
  * @tparam T The numeric type of matrix elements (e.g., float, int).
  * @param h_input A flattened matrix of size rows * cols.
@@ -84,7 +91,12 @@ T trace(const std::vector<T>& h_input, size_t rows, size_t cols) {
   // Copy input data from host to device
   cudaMemcpy(d_input, h_input.data(), input_size, cudaMemcpyHostToDevice);
   // Launch the kernel
-  traceKernel<T><<<blocksPerGrid, threadsPerBlock>>>(d_input, d_output, diag_len, cols);
+  // ====== native ======
+  // traceKernel<T><<<blocksPerGrid, threadsPerBlock>>>(d_input, d_output, diag_len, cols);
+  // ====== with reduction ======
+  size_t shared_mem_size = threadsPerBlock * sizeof(T);
+  traceKernelWithReduction<T><<<blocksPerGrid, threadsPerBlock, shared_mem_size>>>(d_input, d_output, diag_len, cols);
+  cudaDeviceSynchronize();
   // Copy the diagonal elements back to host
   std::vector<T> h_output(diag_len);
   cudaMemcpy(h_output.data(), d_output, output_size, cudaMemcpyDeviceToHost);

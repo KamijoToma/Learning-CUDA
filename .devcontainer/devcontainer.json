@@ -1,0 +1,33 @@
+{
+    "name": "CUDA 13.1 + Makefile + clangd",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "args": { "VARIANT": "13.1.0-devel-ubuntu22.04" }
+    },
+    "runArgs": ["--gpus", "all"],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "llvm-vs-code-extensions.vscode-clangd",
+                "ms-vscode.cpptools",
+                "ms-vscode.cuda-cpp-tools",
+                "github.copilot-chat"
+            ],
+            "settings": {
+                "C_Cpp.intelliSenseEngine": "disabled",
+                "clangd.arguments": [
+                    "--background-index",
+                    "--clang-tidy",
+                    "--header-insertion=iwyu",
+                    "--query-driver=/usr/bin/g++,/usr/local/cuda/bin/nvcc"
+                ],
+                "files.associations": {
+                    "*.cu": "cuda-cpp",
+                    "*.cuh": "cuda-cpp"
+                },
+                "github.copilot.enable": true
+            }
+        }
+    },
+    "remoteUser": "root"
+}

@@ -1,0 +1,27 @@
+CompileFlags:
+  Add: [
+    "-x", "cuda",                     # 强制将所有文件视为 CUDA 代码
+    "--cuda-path=/usr/local/cuda",    # 指明 CUDA 安装路径
+    "--cuda-gpu-arch=sm_86",          # 适配 3070
+    "-std=c++17",                     # 必须与 Makefile 保持一致
+    
+    # 核心修复：定义这些宏来绕过 GCC libstdc++ 的内部解析错误
+    "-D__CUDACC__",
+    "-D__CUDACC_VER_MAJOR__=13",
+    "-D__CUDACC_VER_MINOR__=1",
+    
+    # 针对 _Tp_alloc_type 错误的补丁：
+    # 有时 clang 无法处理 GCC 的扩展语法，强制忽略这些特定的 GCC 警告
+    "-Wno-unknown-attributes",
+    "-Wno-unused-parameter",
+    
+    # 包含路径（确保顺序正确）
+    "-I/usr/local/cuda/include",
+    "-I/usr/include"
+  ]
+
+Index:
+  Background: Build
+
+Diagnostics:
+  Suppress: ["typename_nested_not_found", "unknown_type_name"]

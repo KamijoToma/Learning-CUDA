@@ -1,5 +1,5 @@
 {
-    "name": "CUDA 13.1 + Makefile + clangd",
+    "name": "CUDA 13.1 + Makefile (IntelliSense)",
     "build": {
         "dockerfile": "Dockerfile",
         "args": { "VARIANT": "13.1.0-devel-ubuntu22.04" }
@@ -8,24 +8,22 @@
     "customizations": {
         "vscode": {
             "extensions": [
-                "llvm-vs-code-extensions.vscode-clangd",
                 "ms-vscode.cpptools",
                 "ms-vscode.cuda-cpp-tools",
                 "github.copilot-chat"
             ],
             "settings": {
-                "C_Cpp.intelliSenseEngine": "disabled",
-                "clangd.arguments": [
-                    "--background-index",
-                    "--clang-tidy",
-                    "--header-insertion=iwyu",
-                    "--query-driver=/usr/bin/g++,/usr/local/cuda/bin/nvcc"
-                ],
+                // 确保启用微软的 IntelliSense 引擎
+                "C_Cpp.intelliSenseEngine": "default", 
+                // 让插件自动从 compile_commands.json 获取编译信息
+                "C_Cpp.default.compileCommands": "${workspaceFolder}/compile_commands.json",
+                // 解决 CUDA 头文件识别的关键
+                "C_Cpp.default.compilerPath": "/usr/local/cuda/bin/nvcc",
+                "C_Cpp.default.cudaPath": "/usr/local/cuda",
                 "files.associations": {
                     "*.cu": "cuda-cpp",
                     "*.cuh": "cuda-cpp"
-                },
-                "github.copilot": { "enable": true }
+                }
             }
         }
     },

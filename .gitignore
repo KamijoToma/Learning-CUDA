@@ -75,3 +75,4 @@ Testing/
 .cache/
 
 test_kernels
+tester/tests/matmul_test

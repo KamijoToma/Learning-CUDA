@@ -76,3 +76,4 @@ Testing/
 
 test_kernels
 tester/tests/matmul_test
+tester/tests/flash_attention_test

@@ -1,0 +1,173 @@
+# *********************************************************************
+# Test Infrastructure Makefile Extension
+# This file extends the main Makefile with test capabilities.
+# 
+# Usage:
+#   make -f Makefile.tests               : Build and run all tests
+#   make -f Makefile.tests build-tests   : Only build tests
+#   make -f Makefile.tests run-tests     : Run tests (verbose)
+#   make -f Makefile.tests clean-tests   : Clean test binaries
+#   make -f Makefile.tests nsys-profile  : Profile with Nsight Systems
+#   make -f Makefile.tests ncu-profile   : Profile with Nsight Compute
+# *********************************************************************
+
+# Default goal: run tests unless a specific TEST is provided
+ifdef TEST
+.DEFAULT_GOAL := run-test
+else
+.DEFAULT_GOAL := all-tests
+endif
+
+# Include the main Makefile to inherit settings
+include Makefile
+
+# -------------------------------
+# Test Configuration
+# -------------------------------
+TEST_DIR        := tester/tests
+TEST_SRC        := $(wildcard $(TEST_DIR)/*_test.cpp)
+TEST_TARGETS    := $(patsubst $(TEST_DIR)/%.cpp,%,$(TEST_SRC))
+TEST_BINS       := $(addprefix $(TEST_DIR)/,$(TEST_TARGETS))
+
+# Compiler flags for tests
+TEST_CFLAGS     := $(CFLAGS) -I. -Itester $(PLATFORM_DEFINE)
+
+# Ensure CUDA compilation for test sources when using nvcc
+ifeq ($(CC),nvcc)
+	TEST_CFLAGS += -x cu
+endif
+
+# -------------------------------
+# Phony Targets
+# -------------------------------
+.PHONY: all-tests build-tests run-tests run-test clean-tests nsys-profile ncu-profile
+
+# Default: build and run tests
+all-tests: build-tests run-tests
+
+# Build all test binaries
+build-tests: $(TEST_BINS)
+
+# Run all tests with verbose output
+run-tests: $(TEST_BINS)
+	@echo "========================================="
+	@echo "Running All Tests"
+	@echo "========================================="
+	@for test in $(TEST_BINS); do \
+		echo ""; \
+		echo "Executing: $$test"; \
+		echo "-----------------------------------------"; \
+		$$test --verbose; \
+		echo ""; \
+	done
+
+# Run a single test with verbose output
+# Usage: make -f Makefile.tests TEST=matmul_test
+run-test: build-tests
+	@if [ -z "$(TEST)" ]; then \
+		echo "Error: Please specify TEST=<test_name>"; \
+		echo "Available tests: $(TEST_TARGETS)"; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(TEST_DIR)/$(TEST)" ]; then \
+		echo "Error: Test '$(TEST)' not found"; \
+		exit 1; \
+	fi
+	@echo "========================================="
+	@echo "Running Test: $(TEST)"
+	@echo "========================================="
+	$(TEST_DIR)/$(TEST) --verbose
+
+# Clean test binaries
+clean-tests:
+	@echo "=== Cleaning test binaries ==="
+	rm -f $(TEST_BINS)
+	rm -f $(TEST_DIR)/*.o
+
+# -------------------------------
+# Build Rules for Test Binaries
+# -------------------------------
+
+# Pattern rule to build each test
+$(TEST_DIR)/%_test: $(TEST_DIR)/%_test.cpp tester/test_framework.h
+	@echo "=== Building test: $@ ==="
+	$(CC) $(TEST_CFLAGS) -o $@ $< $(EXTRA_LIBS)
+
+# -------------------------------
+# Profiling with Nsight Tools
+# -------------------------------
+
+# Profile with Nsight Systems
+# Usage: make -f Makefile.tests nsys-profile TEST=matmul_test
+nsys-profile: build-tests
+	@if [ -z "$(TEST)" ]; then \
+		echo "Error: Please specify TEST=<test_name>"; \
+		echo "Available tests: $(TEST_TARGETS)"; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(TEST_DIR)/$(TEST)" ]; then \
+		echo "Error: Test '$(TEST)' not found"; \
+		exit 1; \
+	fi
+	@echo "=== Profiling with Nsight Systems: $(TEST) ==="
+	nsys profile --stats=true \
+		--output=$(TEST_DIR)/$(TEST)_nsys_report \
+		--force-overwrite=true \
+		$(TEST_DIR)/$(TEST) --verbose
+
+# Profile with Nsight Compute
+# Usage: make -f Makefile.tests ncu-profile TEST=matmul_test
+ncu-profile: build-tests
+	@if [ -z "$(TEST)" ]; then \
+		echo "Error: Please specify TEST=<test_name>"; \
+		echo "Available tests: $(TEST_TARGETS)"; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(TEST_DIR)/$(TEST)" ]; then \
+		echo "Error: Test '$(TEST)' not found"; \
+		exit 1; \
+	fi
+	@echo "=== Profiling with Nsight Compute: $(TEST) ==="
+	ncu --set full \
+		--export=$(TEST_DIR)/$(TEST)_ncu_report \
+		--force-overwrite \
+		$(TEST_DIR)/$(TEST) --verbose
+
+# Lightweight kernel profile
+ncu-quick: build-tests
+	@if [ -z "$(TEST)" ]; then \
+		echo "Error: Please specify TEST=<test_name>"; \
+		echo "Available tests: $(TEST_TARGETS)"; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(TEST_DIR)/$(TEST)" ]; then \
+		echo "Error: Test '$(TEST)' not found"; \
+		exit 1; \
+	fi
+	@echo "=== Quick profiling with Nsight Compute: $(TEST) ==="
+	ncu --metrics=sm__cycles_elapsed.avg,dram__bytes.sum \
+		--kernel-name-base=function \
+		$(TEST_DIR)/$(TEST) --verbose
+
+# -------------------------------
+# Help
+# -------------------------------
+help-tests:
+	@echo "Test Infrastructure Commands:"
+	@echo "  make -f Makefile.tests                    : Build and run all tests"
+	@echo "  make -f Makefile.tests build-tests        : Build test binaries"
+	@echo "  make -f Makefile.tests run-tests          : Run all tests (verbose)"
+	@echo "  make -f Makefile.tests TEST=<name>        : Run single test (verbose)"
+	@echo "  make -f Makefile.tests clean-tests        : Clean test binaries"
+	@echo ""
+	@echo "Profiling Commands:"
+	@echo "  make -f Makefile.tests nsys-profile TEST=<name>  : Profile with Nsight Systems"
+	@echo "  make -f Makefile.tests ncu-profile TEST=<name>   : Profile with Nsight Compute (full)"
+	@echo "  make -f Makefile.tests ncu-quick TEST=<name>     : Quick kernel metrics"
+	@echo ""
+	@echo "Available tests: $(TEST_TARGETS)"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make -f Makefile.tests build-tests"
+	@echo "  make -f Makefile.tests nsys-profile TEST=matmul_test"
+	@echo "  make -f Makefile.tests ncu-quick TEST=matmul_test"

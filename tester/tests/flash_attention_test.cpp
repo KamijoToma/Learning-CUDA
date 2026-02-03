@@ -1,4 +1,5 @@
 #define ENABLE_FLASHATTN_SIMPLE_CUDA
+#define ENABLE_FLASHATTN_CUDA
 #include <cuda_runtime.h>
 #include "../test_framework.h"
 
@@ -103,7 +104,7 @@ void flashAttentionCPU(const std::vector<float>& h_q,
 
 #ifdef ENABLE_FLASHATTN_SIMPLE_CUDA
 
-// 错误检查宏
+// Error checking helper
 #define CUDA_CHECK(call) \
     do { \
         cudaError_t err = call; \
@@ -114,12 +115,19 @@ void flashAttentionCPU(const std::vector<float>& h_q,
         } \
     } while (0)
 
-__global__ void flash_attention_simple_kernel(
+__global__ void flash_attention_kernel(
     const float* __restrict__ Q,
     const float* __restrict__ K,
     const float* __restrict__ V,
     float* __restrict__ O,
-    int T, int S, int D, bool is_causal)
+    int T, int S, int D,
+    int QH, int KH, // Query Heads, Key/Value Heads
+    // Strides (Layout: [Batch, Seq, Head, Dim])
+    int stride_q_b, int stride_q_t, int stride_q_h,
+    int stride_k_b, int stride_k_s, int stride_k_h,
+    int stride_v_b, int stride_v_s, int stride_v_h,
+    int stride_o_b, int stride_o_t, int stride_o_h,
+    bool is_causal)
 {
     // ==========================================
     // 1. 设置 Shared Memory
@@ -135,15 +143,33 @@ __global__ void flash_attention_simple_kernel(
     float* V_shared = smem + BC * D;  // V 块的起始位置
 
     // ==========================================
-    // 2. 线程定位
+    // 2. 线程定位与分块 (新增: 多 Batch 多 Head)
     // ==========================================
+    // Grid.z = Batch, Grid.y = Query Heads
+    int b = blockIdx.z;
+    int qh = blockIdx.y;
+
+    // Handle GQA/MQA: Map query head to kv head
+    // group_size = QH / KH (Assuming QH is multiple of KH)
+    int kh = qh / (QH / KH);
+
     // 每个线程负责处理 Query 序列中的一个 token。
     // 也就是处理一行 Q，算出针对所有 K 的注意力，最后得到一行 O。
     int tx = threadIdx.x;
     int t = blockIdx.x * blockDim.x + tx; // 当前处理的是第 t 个 query
 
     // ==========================================
-    // 3. 寄存器初始化
+    // 3. 多维指针计算 (新增)
+    // ==========================================
+    // 为了支持 batch 和 heads，我们需要正确跳跃指针
+    // 指向对应 batch 对应 head 的矩阵起始位置
+    const float* Q_ptr = Q + b * stride_q_b + qh * stride_q_h;
+    const float* K_ptr = K + b * stride_k_b + kh * stride_k_h;
+    const float* V_ptr = V + b * stride_v_b + kh * stride_v_h;
+    float* O_ptr = O + b * stride_o_b + qh * stride_o_h;
+
+    // ==========================================
+    // 4. 寄存器初始化
     // ==========================================
     // 我们假设 D 比较小 (<= 64)，可以直接把 Q 的一行和 O 的一行放进寄存器。
     // 这样计算 Dot Product 时非常快。
@@ -158,7 +184,8 @@ __global__ void flash_attention_simple_kernel(
     // 让线程加载自己负责的那一行 Q 到寄存器
     if (t < T) {
         for (int d = 0; d < D; ++d) {
-            if (d < MAX_D) q_reg[d] = Q[t * D + d];
+             // 注意：这里的内存访问也需要考虑 sequence stride
+            if (d < MAX_D) q_reg[d] = Q_ptr[t * stride_q_t + d];
         }
     }
 
@@ -166,13 +193,13 @@ __global__ void flash_attention_simple_kernel(
     float scale = 1.0f / sqrtf((float)D);
 
     // ==========================================
-    // 4. 外层循环：遍历 K 和 V 的分块
+    // 5. 外层循环：遍历 K 和 V 的分块
     // ==========================================
     // 我们把 Key/Value 序列切成长度为 BC 的小块。
     // 每次迭代处理一个块。
     for (int s_base = 0; s_base < S; s_base += BC) {
         
-        // 4.1. 协作加载 K, V 到 Shared Memory
+        // 5.1. 协作加载 K, V 到 Shared Memory
         // ----------------------------------
         // 一个 Block 有 blockDim.x 个线程，大家一起要把 BC*D 大小的数据搬进来。
         int elements_to_load = BC * D;
@@ -183,10 +210,9 @@ __global__ void flash_attention_simple_kernel(
             int s = s_base + row; // 全局序列索引
             
             if (s < S) {
-                // 如果在范围内，正常加载
-                int src_idx = s * D + col;
-                K_shared[row * D + col] = K[src_idx];
-                V_shared[row * D + col] = V[src_idx];
+                 // 注意：需要使用 K_ptr 和 stride_k_s
+                K_shared[row * D + col] = K_ptr[s * stride_k_s + col];
+                V_shared[row * D + col] = V_ptr[s * stride_v_s + col];
             } else {
                 // 越界补0 (Safety)
                 K_shared[row * D + col] = 0.0f;
@@ -197,7 +223,7 @@ __global__ void flash_attention_simple_kernel(
         // 同步！必须等大家把数据都搬进 Shared Memory
         __syncthreads();
 
-        // 4.2. 计算 Attention (核心部分)
+        // 5.2. 计算 Attention (核心部分)
         // ----------------------------------
         if (t < T) { // 只计算有效的 query
             // 当前块的实际长度 (可能在最后一个块不足 BC)
@@ -205,7 +231,7 @@ __global__ void flash_attention_simple_kernel(
 
             // 遍历当前块里的每一个 Key
             for (int k = 0; k < current_chunk_len; ++k) {
-                int s = s_base + k; // 当前 Key 的全局索引
+                int s = s_base + k; // Global source index
 
                 // Causal Masking (因果遮蔽)
                 // 如果启用，且 source > target，则这一项无效
@@ -231,12 +257,10 @@ __global__ void flash_attention_simple_kernel(
                 float m_prev = m_i;
                 m_i = fmaxf(m_prev, score);
                 
-                // alpha 是重新缩放旧累加值的系数
+                // Be careful with -inf
                 float alpha = (m_prev == -INFINITY) ? 0.0f : expf(m_prev - m_i);
-                // P_val 是当前这一项对 softmax 的贡献
                 float P_val = expf(score - m_i);
 
-                // 更新分母
                 l_i = l_i * alpha + P_val;
 
                 // 更新分子 (Weighted Sum)
@@ -253,25 +277,28 @@ __global__ void flash_attention_simple_kernel(
     }
 
     // ==========================================
-    // 5. 最终写回
+    // 6. 最终写回
     // ==========================================
     // 现在的 o_reg 只是加权和，还需要除以分母 l_i
     if (t < T) {
         float inv_l = (l_i > 0.0f) ? (1.0f / l_i) : 0.0f;
         for (int d = 0; d < D; ++d) {
-             if (d < MAX_D) O[t * D + d] = o_reg[d] * inv_l;
+             // 写入全局内存时使用 O_ptr 和 stride_o_t
+             if (d < MAX_D) O_ptr[t * stride_o_t + d] = o_reg[d] * inv_l;
         }
     }
 }
 
-
-void flashAttentionSimpleCUDA(const std::vector<float>& h_q,
-                              const std::vector<float>& h_k,
-                              const std::vector<float>& h_v,
-                              std::vector<float>& h_o,
-                              int target_seq_len, int src_seq_len,
-                              int head_dim, bool is_causal) {
-    // 1. Allocate Device Memory
+// Unified Host Implementation
+void flashAttentionCUDA(const std::vector<float>& h_q,
+                        const std::vector<float>& h_k,
+                        const std::vector<float>& h_v,
+                        std::vector<float>& h_o,
+                        int batch_size, int target_seq_len, int src_seq_len,
+                        int query_heads, int kv_heads, int head_dim,
+                        bool is_causal) {
+    
+    // Allocate Device Memory
     float *d_q, *d_k, *d_v, *d_o;
     size_t size_q = h_q.size() * sizeof(float);
     size_t size_k = h_k.size() * sizeof(float);
@@ -283,39 +310,80 @@ void flashAttentionSimpleCUDA(const std::vector<float>& h_q,
     CUDA_CHECK(cudaMalloc(&d_v, size_v));
     CUDA_CHECK(cudaMalloc(&d_o, size_o));
 
-    // 2. Copy Data to Device
     CUDA_CHECK(cudaMemcpy(d_q, h_q.data(), size_q, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_k, h_k.data(), size_k, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_v, h_v.data(), size_v, cudaMemcpyHostToDevice));
 
-    // 3. Configuration
-    int block_size = 32; // Threads per block
-    // Grid size to cover T
-    int grid_size = (target_seq_len + block_size - 1) / block_size;
-    
-    // Shared Memory Size: 2 * BC * D * sizeof(float)
-    // BC matches the kernel constant (32)
+    // Strides Calculation: Layout [B, T, H, D]
+    // Q: [B, T, QH, D]
+    int stride_q_h = head_dim;
+    int stride_q_t = query_heads * head_dim;
+    int stride_q_b = target_seq_len * stride_q_t;
+
+    // K, V: [B, S, KH, D]
+    int stride_k_h = head_dim;
+    int stride_k_s = kv_heads * head_dim;
+    int stride_k_b = src_seq_len * stride_k_s;
+
+    // V: same as K
+    int stride_v_h = head_dim;
+    int stride_v_s = kv_heads * head_dim;
+    int stride_v_b = src_seq_len * stride_v_s;
+
+    // O: [B, T, QH, D]
+    int stride_o_h = head_dim;
+    int stride_o_t = query_heads * head_dim;
+    int stride_o_b = target_seq_len * stride_o_t;
+
+    // Kernel Configuration
+    int block_size = 32;
     int BC = 32;
     size_t shared_mem_size = 2 * BC * head_dim * sizeof(float);
+    
+    // 3D Grid: x=Time, y=QueryHeads, z=Batch
+    dim3 grid((target_seq_len + block_size - 1) / block_size, query_heads, batch_size);
 
-    // 4. Launch Kernel
-    // Note: We use the simplest kernel launch
-    flash_attention_simple_kernel<<<grid_size, block_size, shared_mem_size>>>(
-        d_q, d_k, d_v, d_o, target_seq_len, src_seq_len, head_dim, is_causal
+    flash_attention_kernel<<<grid, block_size, shared_mem_size>>>(
+        d_q, d_k, d_v, d_o,
+        target_seq_len, src_seq_len, head_dim,
+        query_heads, kv_heads,
+        stride_q_b, stride_q_t, stride_q_h,
+        stride_k_b, stride_k_s, stride_k_h,
+        stride_v_b, stride_v_s, stride_v_h,
+        stride_o_b, stride_o_t, stride_o_h,
+        is_causal
     );
+
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    // 5. Copy Result Back
     CUDA_CHECK(cudaMemcpy(h_o.data(), d_o, size_o, cudaMemcpyDeviceToHost));
 
-    // 6. Free Memory
     CUDA_CHECK(cudaFree(d_q));
     CUDA_CHECK(cudaFree(d_k));
     CUDA_CHECK(cudaFree(d_v));
     CUDA_CHECK(cudaFree(d_o));
 }
+
+// Wrapper for the simple test
+void flashAttentionSimpleCUDA(const std::vector<float>& h_q,
+                              const std::vector<float>& h_k,
+                              const std::vector<float>& h_v,
+                              std::vector<float>& h_o,
+                              int target_seq_len, int src_seq_len,
+                              int head_dim, bool is_causal) {
+    // Call the general version with B=1, QH=1, KH=1
+    flashAttentionCUDA(h_q, h_k, h_v, h_o, 1, target_seq_len, src_seq_len, 1, 1, head_dim, is_causal);
+}
 #endif
+
+// Enable CUDA for the main test as well
+void flashAttention(const std::vector<float>& q, const std::vector<float>& k, const std::vector<float>& v, std::vector<float>& o,
+                    int B, int T, int S, int QH, int KH, int D, bool causal) {
+#ifdef ENABLE_FLASHATTN_SIMPLE_CUDA   
+    flashAttentionCUDA(q, k, v, o, B, T, S, QH, KH, D, causal);
+#endif
+}
 
 // ========================================
 // FlashAttention Tests

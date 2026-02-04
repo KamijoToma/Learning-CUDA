@@ -2,19 +2,25 @@
     "name": "CUDA 13.1 + Makefile (IntelliSense)",
     "build": {
         "dockerfile": "Dockerfile",
-        "args": { "VARIANT": "13.1.0-devel-ubuntu22.04" }
+        "args": {
+            "VARIANT": "13.1.0-devel-ubuntu22.04"
+        }
     },
-    "runArgs": ["--gpus", "all"],
+    "runArgs": [
+        "--gpus",
+        "all"
+    ],
     "customizations": {
         "vscode": {
             "extensions": [
                 "ms-vscode.cpptools",
                 "ms-vscode.cuda-cpp-tools",
-                "github.copilot-chat"
+                "github.copilot-chat",
+                "anthropic.claude-code"
             ],
             "settings": {
                 // 确保启用微软的 IntelliSense 引擎
-                "C_Cpp.intelliSenseEngine": "default", 
+                "C_Cpp.intelliSenseEngine": "default",
                 // 让插件自动从 compile_commands.json 获取编译信息
                 "C_Cpp.default.compileCommands": "${workspaceFolder}/compile_commands.json",
                 // 解决 CUDA 头文件识别的关键
@@ -27,5 +33,12 @@
             }
         }
     },
-    "remoteUser": "root"
+    "remoteUser": "root",
+    "mounts": [
+        // This creates a persistent volume named 'bash-history' 
+        "source=bash-history,target=/commandhistory,type=volume"
+    ],
+    "containerEnv": {
+        "HISTFILE": "/commandhistory/.bash_history"
+    }
 }
